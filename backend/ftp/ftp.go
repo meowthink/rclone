@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"reflect"
+	"unsafe"
 
 	"github.com/rclone/ftp"
 	"github.com/rclone/rclone/fs"
@@ -829,7 +831,20 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 
 // Hashes are not supported
 func (f *Fs) Hashes() hash.Set {
-	return 0
+	ctx := context.TODO()
+	hashSet := hash.NewHashSet()
+	c, err := f.getFtpConnection(ctx)
+	rf := reflect.Indirect(reflect.ValueOf(c)).FieldByName("features")
+	rf = reflect.NewAt(rf.Type(), unsafe.Pointer(rf.UnsafeAddr())).Elem()
+	features := rf.Interface().(map[string]string)
+	_, xmd5 := features["XMD5"]
+	if err == nil {
+		if xmd5 {
+			hashSet.Add(hash.MD5)
+		}
+		f.putFtpConnection(&c, err)
+	}
+	return hashSet
 }
 
 // Precision shows whether modified time is supported or not depending on the
@@ -1058,6 +1073,24 @@ func (o *Object) Remote() string {
 
 // Hash returns the hash of an object returning a lowercase hex string
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
+	if t == hash.MD5 {
+		c, err := o.fs.getFtpConnection(ctx)
+		if err == nil {
+			path := path.Join(o.fs.root, o.remote)
+			path = o.fs.opt.Enc.FromStandardPath(path)
+			rf := reflect.Indirect(reflect.ValueOf(c)).FieldByName("conn")
+			rf = reflect.NewAt(rf.Type(), unsafe.Pointer(rf.UnsafeAddr())).Elem()
+			conn := rf.Interface().(*textproto.Conn)
+			_, err := conn.Cmd("XMD5 %s", path)
+			if err == nil {
+				expected := -1
+				_, msg, err := conn.ReadResponse(expected)
+				o.fs.putFtpConnection(&c, err)
+				return strings.ToLower(msg), nil
+			}
+			o.fs.putFtpConnection(&c, err)
+		}
+	}
 	return "", hash.ErrUnsupported
 }
 
